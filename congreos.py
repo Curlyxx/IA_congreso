@@ -108,9 +108,7 @@ class ModeloRiesgo:
         self.modelo         = RandomForestClassifier(n_estimators=200,
                                                      max_depth=12,
                                                      random_state=42,
-                                                     n_jobs=-1,
-                                                     class_weight={0:1, 1:3}  # 🔥 penaliza más los defaults
-                                                     )
+                                                     n_jobs=-1)
         self.encoders       = {}
         self.esta_entrenado = False
         self.accuracy       = None
@@ -160,10 +158,8 @@ class ModeloRiesgo:
 
         self.modelo.fit(X_train, y_train)
 
-        threshold = 0.35  # 🔥 AJUSTABLE
-
+        y_pred  = self.modelo.predict(X_test)
         y_proba = self.modelo.predict_proba(X_test)[:, 1]
-        y_pred = (y_proba >= threshold).astype(int)
 
         self.accuracy = accuracy_score(y_test, y_pred)
         self.auc      = roc_auc_score(y_test, y_proba)
@@ -390,7 +386,7 @@ class ResultCard(tk.Frame):
 
         # Nota explicativa si está en zona de umbral
         if 0.29 <= pct <= 0.32:
-            t.insert("end", "\n─" * 21 + "\n", "muted")
+            t.insert("end", "\n─" * 5 + "\n", "muted")
             t.insert("end", "ℹ️  NOTA SOBRE % INGRESO COMPROMETIDO\n\n", "titulo")
             t.insert("end",
                 "  El dataset muestra un umbral real muy marcado:\n"
@@ -399,7 +395,7 @@ class ResultCard(tk.Frame):
                 "  Este salto refleja patrones reales en los datos\n"
                 "  de entrenamiento, no un error del modelo.\n", "alerta")
 
-        t.insert("end", "\n─" * 21 + "\n", "muted")
+        t.insert("end", "\n─" * 5 + "\n", "muted")
         t.insert("end", "💡  RECOMENDACIÓN\n\n", "titulo")
 
         if pred == 0 and prob < 0.35:
@@ -827,6 +823,11 @@ class App:
         nb.add(tab_imp, text="  🔬  Variables clave  ")
         self._crear_tab_importancias(tab_imp)
 
+        # Tab 4 – Visualizaciones del modelo
+        tab_viz = tk.Frame(nb, bg=C["panel2"])
+        nb.add(tab_viz, text="  🧠  Visualizaciones  ")
+        self._crear_tab_visualizaciones(tab_viz)
+
         self.nb = nb   # guardar referencia para navegar tabs
 
     def _crear_tab_metricas(self, parent):
@@ -887,6 +888,8 @@ class App:
         self._status(f"Modelo listo · Accuracy {acc*100:.1f}% · AUC-ROC {auc:.3f}")
         self._actualizar_metricas(acc, auc, rep)
         self._actualizar_importancias()
+        # Regenerar gráficas con el modelo recién entrenado
+        threading.Thread(target=self._generar_graficas_modelo, daemon=True).start()
         messagebox.showinfo("Entrenamiento completo",
                             f"✅ Modelo entrenado correctamente.\n\n"
                             f"  Accuracy : {acc*100:.1f}%\n"
@@ -894,6 +897,216 @@ class App:
                             f"Dataset: {self.modelo.df_info['total']:,} préstamos "
                             f"({self.modelo.df_info['buenos']:,} buenos / "
                             f"{self.modelo.df_info['defaults']:,} defaults)")
+
+    def _generar_graficas_modelo(self):
+        """Genera las 4 gráficas del modelo en background y refresca la pestaña."""
+        try:
+            import matplotlib
+            matplotlib.use('Agg')
+            import matplotlib.pyplot as plt
+            import matplotlib.patches as mpatches
+            from matplotlib.colors import LinearSegmentedColormap
+            import seaborn as sns
+            from sklearn.tree import plot_tree
+            from sklearn.ensemble import RandomForestClassifier
+            from sklearn.metrics import roc_curve, auc as sk_auc
+
+            m = self.modelo
+            df_orig = pd.read_csv(self.ruta_csv.get().strip())
+            df_orig.dropna(inplace=True)
+
+            FEATURES_CAT = m.FEATURES_CAT
+            FEATURES_NUM = m.FEATURES_NUM
+            ALL_FEATURES  = FEATURES_NUM + FEATURES_CAT
+
+            df2 = df_orig.copy()
+            for col in FEATURES_CAT:
+                le = m.encoders[col]
+                df2[col] = le.transform(df2[col].astype(str))
+
+            from sklearn.model_selection import train_test_split
+            X = df2[ALL_FEATURES]
+            y = df2["loan_status"]
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y, test_size=0.25, stratify=y, random_state=42)
+
+            nombres = {
+                "loan_percent_income":        "% Ingreso\ncomprometido",
+                "loan_int_rate":              "Tasa de\ninterés",
+                "loan_grade":                 "Grado del\npréstamo",
+                "loan_amnt":                  "Monto del\npréstamo",
+                "person_income":              "Ingreso\nanual",
+                "cb_person_cred_hist_length": "Historial\ncrediticio",
+                "person_age":                 "Edad",
+                "person_emp_length":          "Años de\nempleo",
+                "person_home_ownership":      "Tipo de\nvivienda",
+                "loan_intent":                "Propósito\npréstamo",
+                "cb_person_default_on_file":  "Default\nprevio",
+            }
+            feat_names_b = [nombres.get(f, f) for f in ALL_FEATURES]
+
+            BG    = '#1a1a2e'
+            PANEL = '#16161f'
+
+            # ── Árbol simplificado ──────────────────────────
+            small = RandomForestClassifier(n_estimators=1, max_depth=3, random_state=42)
+            small.fit(X_train, y_train)
+
+            fig1, ax1 = plt.subplots(figsize=(20, 8))
+            fig1.patch.set_facecolor(BG)
+            ax1.set_facecolor(BG)
+            plot_tree(small.estimators_[0],
+                      feature_names=feat_names_b,
+                      class_names=["Sin default", "Con default"],
+                      filled=True, rounded=True, fontsize=8, ax=ax1,
+                      impurity=False, proportion=True, precision=2)
+            ax1.set_title(
+                "Árbol de decisión simplificado (profundidad 3)\n"
+                "Ejemplo de cómo el modelo toma decisiones",
+                color='#e8e8f0', fontsize=13, pad=15, fontweight='bold')
+
+            # Bordes de cajas y flechas conectoras → blanco
+            for artist in ax1.get_children():
+                if hasattr(artist, 'set_edgecolor'):
+                    try:
+                        ec = artist.get_edgecolor()
+                        if hasattr(ec, '__len__') and len(ec) >= 3:
+                            if ec[0] < 0.15 and ec[1] < 0.15 and ec[2] < 0.15:
+                                artist.set_edgecolor('white')
+                    except Exception:
+                        pass
+                # Flechas (FancyArrowPatch) → blanco
+                if hasattr(artist, 'set_color') and 'Arrow' in type(artist).__name__:
+                    try:
+                        artist.set_color('white')
+                    except Exception:
+                        pass
+
+            # Texto: solo los de FUERA de caja (True/False) → blanco
+            # Los de DENTRO de caja (tienen bbox_patch) se quedan en negro para legibilidad
+            for txt_obj in ax1.texts:
+                if txt_obj.get_bbox_patch() is None:
+                    txt_obj.set_color('white')   # True / False / etiquetas externas
+
+            fig1.savefig('/tmp/tree_simple.png', dpi=130, bbox_inches='tight',
+                         facecolor=BG, edgecolor='none')
+            plt.close(fig1)
+
+            # ── Importancia de variables ────────────────────
+            importancias = dict(zip(ALL_FEATURES, m.modelo.feature_importances_))
+            sorted_items = sorted(importancias.items(), key=lambda x: x[1])
+            feat_s = [nombres.get(k, k).replace('\n', ' ') for k, _ in sorted_items]
+            vals_s = [v for _, v in sorted_items]
+            colors_b = ['#6c63ff' if v > 0.15 else '#f9d423' if v > 0.07 else '#5a5a7a'
+                        for v in vals_s]
+
+            fig2, ax2 = plt.subplots(figsize=(10, 6))
+            fig2.patch.set_facecolor(BG); ax2.set_facecolor(PANEL)
+            bars = ax2.barh(feat_s, vals_s, color=colors_b,
+                            edgecolor='#2a2a3e', linewidth=0.5, height=0.65)
+            for bar, val in zip(bars, vals_s):
+                ax2.text(val + 0.003, bar.get_y() + bar.get_height()/2,
+                         f'{val*100:.1f}%', va='center', color='#e8e8f0', fontsize=9)
+            ax2.set_xlabel('Importancia relativa', color='#5a5a7a', fontsize=10)
+            ax2.set_title('¿Qué variable influye más en la predicción de riesgo?',
+                          color='#e8e8f0', fontsize=12, fontweight='bold', pad=12)
+            ax2.tick_params(colors='#e8e8f0', labelsize=9)
+            ax2.spines['top'].set_visible(False); ax2.spines['right'].set_visible(False)
+            for sp in ax2.spines.values(): sp.set_color('#2a2a3e')
+            ax2.set_xlim(0, max(vals_s) * 1.18)
+            p1 = mpatches.Patch(color='#6c63ff', label='Alta (>15%)')
+            p2 = mpatches.Patch(color='#f9d423', label='Media (7-15%)')
+            p3 = mpatches.Patch(color='#5a5a7a', label='Baja (<7%)')
+            ax2.legend(handles=[p1,p2,p3], loc='lower right',
+                       facecolor=PANEL, edgecolor='#2a2a3e',
+                       labelcolor='#e8e8f0', fontsize=8)
+            fig2.tight_layout()
+            fig2.savefig('/tmp/feature_importance.png', dpi=130, bbox_inches='tight',
+                         facecolor=BG, edgecolor='none')
+            plt.close(fig2)
+
+            # ── Mapa de calor ───────────────────────────────
+            corr_data = df2[ALL_FEATURES + ["loan_status"]].copy()
+            corr_matrix = corr_data.corr()
+            nombres_corr = {col: nombres.get(col, col).replace('\n', ' ')
+                            for col in corr_matrix.columns}
+            corr_matrix.rename(columns=nombres_corr, index=nombres_corr, inplace=True)
+
+            fig3, ax3 = plt.subplots(figsize=(12, 10))
+            fig3.patch.set_facecolor(BG); ax3.set_facecolor(BG)
+            cmap = LinearSegmentedColormap.from_list(
+                'risk', ['#6c63ff', '#1a1a2e', '#ff6b6b'])
+            mask = np.zeros_like(corr_matrix, dtype=bool)
+            mask[np.triu_indices_from(mask)] = True
+            sns.heatmap(corr_matrix, mask=mask, annot=True, fmt='.2f',
+                        annot_kws={'size': 7.5, 'color': '#e8e8f0'},
+                        cmap=cmap, center=0, vmin=-1, vmax=1,
+                        linewidths=0.3, linecolor='#2a2a3e', ax=ax3,
+                        cbar_kws={'shrink': 0.8})
+            ax3.set_title(
+                'Correlación entre variables del dataset\n'
+                '(triángulo inferior — correlación de Pearson)',
+                color='#e8e8f0', fontsize=12, fontweight='bold', pad=14)
+            ax3.tick_params(colors='#e8e8f0', labelsize=8.5)
+            # Colorbar: etiquetas y título en blanco
+            cbar3 = ax3.collections[0].colorbar
+            cbar3.ax.tick_params(colors='#e8e8f0', labelsize=8)
+            cbar3.ax.yaxis.label.set_color('#e8e8f0')
+            cbar3.set_label('Correlación de Pearson', color='#e8e8f0', fontsize=9)
+            # Borde de la colorbar en blanco
+            cbar3.outline.set_edgecolor('#e8e8f0')
+            fig3.tight_layout()
+            fig3.savefig('/tmp/correlacion.png', dpi=130, bbox_inches='tight',
+                         facecolor=BG, edgecolor='none')
+            plt.close(fig3)
+
+            # ── Curva ROC ───────────────────────────────────
+            y_proba = m.modelo.predict_proba(X_test)[:, 1]
+            fpr, tpr, _ = roc_curve(y_test, y_proba)
+            roc_val = sk_auc(fpr, tpr)
+
+            fig4, ax4 = plt.subplots(figsize=(7, 6))
+            fig4.patch.set_facecolor(BG); ax4.set_facecolor(PANEL)
+            ax4.plot(fpr, tpr, color='#6c63ff', lw=2.5,
+                     label=f'Random Forest  (AUC = {roc_val:.4f})')
+            ax4.plot([0,1],[0,1], color='#5a5a7a', lw=1.2,
+                     linestyle='--', label='Clasificador aleatorio (AUC = 0.50)')
+            ax4.fill_between(fpr, tpr, alpha=0.12, color='#6c63ff')
+            ax4.set_xlim([0,1]); ax4.set_ylim([0,1.02])
+            ax4.set_xlabel('Tasa de Falsos Positivos', color='#5a5a7a', fontsize=10)
+            ax4.set_ylabel('Tasa de Verdaderos Positivos', color='#5a5a7a', fontsize=10)
+            ax4.set_title('Curva ROC — Capacidad discriminante del modelo',
+                          color='#e8e8f0', fontsize=12, fontweight='bold', pad=12)
+            ax4.legend(loc='lower right', facecolor=PANEL,
+                       edgecolor='#2a2a3e', labelcolor='#e8e8f0', fontsize=9)
+            ax4.tick_params(colors='#e8e8f0')
+            for sp in ax4.spines.values(): sp.set_color('#2a2a3e')
+            ax4.annotate(
+                f'AUC = {roc_val:.4f}\nExcelente',
+                xy=(0.3, 0.85), color='#43e97b', fontsize=10, fontweight='bold',
+                bbox=dict(boxstyle='round,pad=0.4', facecolor='#0e1a12',
+                          edgecolor='#43e97b', alpha=0.8))
+            fig4.tight_layout()
+            fig4.savefig('/tmp/roc_curve.png', dpi=130, bbox_inches='tight',
+                         facecolor=BG, edgecolor='none')
+            plt.close(fig4)
+
+            # Refrescar la pestaña de visualizaciones en el hilo principal
+            self.root.after(0, self._refrescar_tab_visualizaciones)
+
+        except Exception as ex:
+            print(f"Error generando gráficas: {ex}")
+
+    def _refrescar_tab_visualizaciones(self):
+        """Destruye y recrea la pestaña de visualizaciones para mostrar nuevas gráficas."""
+        try:
+            # La tab de visualizaciones es el índice 4
+            tab_viz = self.nb.nametowidget(self.nb.tabs()[4])
+            for w in tab_viz.winfo_children():
+                w.destroy()
+            self._crear_tab_visualizaciones(tab_viz)
+        except Exception as ex:
+            print(f"Error refrescando tab: {ex}")
 
     def _actualizar_metricas(self, acc, auc, rep):
         info = self.modelo.df_info
@@ -933,6 +1146,418 @@ class App:
         self.txt_metricas.delete("1.0", "end")
         self.txt_metricas.insert("end", texto)
         self.txt_metricas.config(state="disabled")
+
+    # ── Tab de Visualizaciones ────────────────────────────────
+    def _crear_tab_visualizaciones(self, parent):
+        """Pestaña con 4 gráficas del modelo, cada una en su propio sub-frame
+        con título, imagen ampliable y explicación."""
+
+        # Canvas + scrollbar vertical para toda la pestaña
+        canvas = tk.Canvas(parent, bg=C["panel2"], highlightthickness=0)
+        sb = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
+        sb.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+
+        inner = tk.Frame(canvas, bg=C["panel2"])
+        win_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        def _on_resize(e):
+            canvas.itemconfig(win_id, width=e.width)
+        canvas.bind("<Configure>", _on_resize)
+        inner.bind("<Configure>",
+                   lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        # Scroll con rueda del ratón
+        def _scroll(e):
+            canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+        canvas.bind_all("<MouseWheel>", _scroll)
+
+        # Encabezado
+        hdr = tk.Frame(inner, bg=C["panel2"])
+        hdr.pack(fill="x", padx=24, pady=(16, 4))
+        tk.Label(hdr, text="Visualizaciones del Modelo",
+                 font=("Segoe UI", 14, "bold"),
+                 fg=C["accent"], bg=C["panel2"]).pack(side="left")
+        tk.Label(hdr, text="Haz clic en cualquier imagen para abrirla en grande",
+                 font=FONT_SMALL, fg=C["muted"], bg=C["panel2"]).pack(side="left", padx=14)
+
+        tk.Frame(inner, bg=C["border"], height=1).pack(fill="x", padx=24, pady=(4, 0))
+
+        # Definición de gráficas
+        graficas = [
+            {
+                "archivo":   "/tmp/tree_simple.png",
+                "titulo":    "🌳  Árbol de Decisión Simplificado",
+                "subtitulo": "Un árbol de los 200 que componen el bosque — profundidad 3",
+                "color_titulo": C["green"],
+                "explicacion": (
+                    "El Random Forest está formado por 200 árboles de decisión. "
+                    "Esta gráfica muestra cómo funciona internamente UNO de esos árboles, "
+                    "simplificado a solo 3 niveles para que sea legible.\n\n"
+                    "¿Cómo leerlo?\n"
+                    "• Cada nodo (caja) hace una pregunta sobre una variable.\n"
+                    "• Si la respuesta es SÍ, se va a la rama izquierda; si es NO, a la derecha.\n"
+                    "• El color más azul-violeta indica mayor proporción de 'Sin default'.\n"
+                    "• El color más naranja-café indica mayor proporción de 'Con default'.\n"
+                    "• Las cajas más oscuras al fondo son las decisiones finales (hojas).\n\n"
+                    "El árbol real tiene profundidad 12 y 458 hojas. Los 200 árboles "
+                    "votan en conjunto: la clase que obtenga más votos gana la predicción."
+                ),
+            },
+            {
+                "archivo":   "/tmp/feature_importance.png",
+                "titulo":    "📊  Importancia de Variables",
+                "subtitulo": "¿Qué tan influyente es cada variable en la decisión final?",
+                "color_titulo": C["accent"],
+                "explicacion": (
+                    "Esta gráfica muestra cuánto contribuye cada variable a las decisiones "
+                    "del Random Forest, medido promediando la reducción de impureza Gini "
+                    "en todos los árboles.\n\n"
+                    "Interpretación:\n"
+                    "• % Ingreso comprometido (26.6%) — la variable más poderosa. "
+                    "Cuánto del sueldo se destina a pagar el préstamo.\n"
+                    "• Grado del préstamo (15.5%) — la calificación A-G refleja el riesgo "
+                    "evaluado por la institución.\n"
+                    "• Ingreso anual (12.9%) y Tipo de vivienda (12.3%) — perfil económico "
+                    "general del solicitante.\n"
+                    "• Tasa de interés (10.6%) — tasas altas señalan mayor riesgo percibido.\n\n"
+                    "Las variables con menos del 5% (edad, historial crediticio, default previo) "
+                    "tienen influencia marginal en este dataset específico."
+                ),
+            },
+            {
+                "archivo":   "/tmp/correlacion.png",
+                "titulo":    "🔥  Mapa de Calor — Correlaciones",
+                "subtitulo": "¿Cómo se relacionan las variables entre sí y con el default?",
+                "color_titulo": C["yellow"],
+                "explicacion": (
+                    "El mapa de calor muestra la correlación de Pearson entre cada par "
+                    "de variables. Los valores van de -1 a +1:\n\n"
+                    "• Colores rojos → correlación positiva (suben juntas)\n"
+                    "• Colores azul-violeta → correlación negativa (una sube, la otra baja)\n"
+                    "• Color oscuro neutro → sin correlación significativa\n\n"
+                    "Hallazgos clave (columna 'loan_status' = default):\n"
+                    "• loan_percent_income (+0.38) — la correlación más fuerte con default. "
+                    "Más ingreso comprometido = más riesgo.\n"
+                    "• loan_int_rate (+0.34) — tasas de interés altas van de la mano "
+                    "con impago.\n"
+                    "• person_income (-0.14) — a mayor ingreso, menor riesgo.\n\n"
+                    "También se aprecia que loan_int_rate y loan_grade están muy "
+                    "correlacionadas (+0.82): un grado bajo (D, E, F) implica tasa alta."
+                ),
+            },
+            {
+                "archivo":   "/tmp/roc_curve.png",
+                "titulo":    "📈  Curva ROC — Poder Discriminante",
+                "subtitulo": "¿Qué tan bien separa el modelo buenos y malos pagadores?",
+                "color_titulo": C["green"],
+                "explicacion": (
+                    "La curva ROC mide la capacidad del modelo para distinguir entre "
+                    "solicitudes que pagarán y las que no, a distintos umbrales de decisión.\n\n"
+                    "¿Cómo leerla?\n"
+                    "• Eje X: Falsos Positivos — solicitantes buenos marcados como riesgo.\n"
+                    "• Eje Y: Verdaderos Positivos — defaults correctamente detectados.\n"
+                    "• La línea diagonal punteada representa un modelo completamente aleatorio "
+                    "(AUC = 0.50, equivale a adivinar).\n"
+                    "• Cuanto más se acerque la curva a la esquina superior-izquierda, mejor.\n\n"
+                    "Resultado:\n"
+                    "• AUC = 0.97+ → clasificación EXCELENTE.\n"
+                    "• Un AUC mayor a 0.90 se considera sobresaliente en el sector financiero.\n"
+                    "• Significa que el modelo tiene más del 97% de probabilidad de darle "
+                    "mayor puntaje de riesgo a un mal pagador que a uno bueno."
+                ),
+            },
+        ]
+
+        self._img_viz_refs = []   # evitar garbage collection
+
+        for g in graficas:
+            self._agregar_bloque_grafica(inner, g)
+
+    def _agregar_bloque_grafica(self, parent, cfg):
+        """Agrega un bloque de gráfica + explicación al panel de visualizaciones."""
+        bloque = tk.Frame(parent, bg=C["card"], relief="flat")
+        bloque.pack(fill="x", padx=24, pady=12)
+
+        # Encabezado del bloque
+        hdr = tk.Frame(bloque, bg=C["card"], pady=10, padx=16)
+        hdr.pack(fill="x")
+        tk.Label(hdr, text=cfg["titulo"],
+                 font=("Segoe UI", 11, "bold"),
+                 fg=cfg["color_titulo"], bg=C["card"]).pack(anchor="w")
+        tk.Label(hdr, text=cfg["subtitulo"],
+                 font=FONT_SMALL, fg=C["muted"], bg=C["card"]).pack(anchor="w")
+
+        tk.Frame(bloque, bg=C["border"], height=1).pack(fill="x")
+
+        # Área imagen + explicación lado a lado
+        body = tk.Frame(bloque, bg=C["card"])
+        body.pack(fill="x", padx=0, pady=0)
+
+        # Columna izquierda: imagen
+        col_img = tk.Frame(body, bg=C["card"])
+        col_img.pack(side="left", fill="y", padx=(12, 6), pady=12)
+
+        if PIL_DISPONIBLE and os.path.exists(cfg["archivo"]):
+            try:
+                from PIL import Image, ImageTk
+                img = Image.open(cfg["archivo"])
+                img.thumbnail((460, 300), Image.LANCZOS)
+                photo = ImageTk.PhotoImage(img)
+                self._img_viz_refs.append(photo)
+
+                lbl_img = tk.Label(col_img, image=photo,
+                                   bg=C["panel2"], cursor="hand2",
+                                   relief="flat", bd=0)
+                lbl_img.pack()
+                tk.Label(col_img,
+                         text="🔍 Clic para ampliar",
+                         font=("Segoe UI", 8), fg=C["muted"],
+                         bg=C["card"]).pack(pady=(3, 0))
+
+                # Abrir en ventana grande al hacer clic
+                archivo = cfg["archivo"]
+                titulo  = cfg["titulo"]
+                lbl_img.bind("<Button-1>",
+                             lambda e, a=archivo, t=titulo: self._abrir_imagen_grande(a, t))
+            except Exception:
+                tk.Label(col_img, text="[imagen no disponible]",
+                         font=FONT_SMALL, fg=C["muted"], bg=C["card"]).pack()
+        else:
+            tk.Label(col_img,
+                     text="Entrena el modelo\npara generar esta gráfica.",
+                     font=FONT_SMALL, fg=C["muted"], bg=C["card"],
+                     justify="center").pack(padx=20, pady=20)
+
+        # Separador vertical
+        tk.Frame(body, bg=C["border"], width=1).pack(side="left", fill="y", pady=12)
+
+        # Columna derecha: explicación (clickeable para expandir)
+        col_txt = tk.Frame(body, bg=C["card"])
+        col_txt.pack(side="left", fill="both", expand=True, padx=14, pady=12)
+
+        explicacion   = cfg["explicacion"]
+        color_titulo  = cfg["color_titulo"]
+        titulo_bloque = cfg["titulo"]
+
+        txt = scrolledtext.ScrolledText(
+            col_txt,
+            font=("Segoe UI", 9),
+            bg=C["panel2"], fg=C["text"],
+            relief="flat", bd=0,
+            padx=10, pady=8,
+            height=12, wrap="word",
+            cursor="hand2",
+            state="normal"
+        )
+        txt.pack(fill="both", expand=True)
+        txt.insert("end", explicacion)
+        txt.config(state="disabled")
+
+        # Etiqueta de ayuda bajo el texto
+        tk.Label(col_txt,
+                 text="📖 Clic en el texto para ampliar",
+                 font=("Segoe UI", 8), fg=C["muted"],
+                 bg=C["card"]).pack(anchor="w", pady=(2, 0))
+
+        # Clic en el texto → ventana expandible
+        txt.bind("<Button-1>",
+                 lambda e, ex=explicacion, tit=titulo_bloque, col=color_titulo:
+                     self._abrir_texto_grande(ex, tit, col))
+
+    def _abrir_imagen_grande(self, archivo, titulo):
+        """Ventana con zoom (rueda ratón) y paneo (arrastrar) para la imagen."""
+        if not PIL_DISPONIBLE or not os.path.exists(archivo):
+            return
+        from PIL import Image, ImageTk
+
+        win = tk.Toplevel(self.root)
+        win.title(titulo.replace("  ", " ").strip())
+        win.configure(bg=C["bg"])
+
+        screen_w = win.winfo_screenwidth()
+        screen_h = win.winfo_screenheight()
+        win_w = min(screen_w - 60, 1440)
+        win_h = min(screen_h - 60, 960)
+        win.geometry(f"{win_w}x{win_h}")
+
+        # ── Barra de controles ────────────────────────────────
+        bar = tk.Frame(win, bg=C["panel"], pady=6)
+        bar.pack(fill="x")
+        tk.Label(bar, text=titulo.strip(), font=("Segoe UI", 10, "bold"),
+                 fg=C["accent"], bg=C["panel"]).pack(side="left", padx=12)
+
+        def _zoom_in():  _viewer.zoom(1.25)
+        def _zoom_out(): _viewer.zoom(0.8)
+        def _reset():    _viewer.reset()
+
+        for txt, cmd in [("＋  Acercar", _zoom_in),
+                          ("－  Alejar",  _zoom_out),
+                          ("↺  Restablecer", _reset)]:
+            tk.Button(bar, text=txt, font=FONT_SMALL,
+                      bg=C["panel2"], fg=C["text"],
+                      activebackground=C["border"],
+                      relief="flat", cursor="hand2", padx=8, pady=3,
+                      command=cmd).pack(side="left", padx=4)
+
+        tk.Label(bar, text="Rueda del ratón para zoom  ·  Arrastrar para mover",
+                 font=("Segoe UI", 8), fg=C["muted"], bg=C["panel"]).pack(side="right", padx=12)
+
+        tk.Button(bar, text="✕  Cerrar", font=FONT_SMALL,
+                  bg=C["red"], fg="white",
+                  relief="flat", cursor="hand2", padx=8, pady=3,
+                  command=win.destroy).pack(side="right", padx=8)
+
+        # ── Canvas con zoom y paneo ───────────────────────────
+        canvas = tk.Canvas(win, bg=C["bg"], highlightthickness=0,
+                           cursor="fleur")
+        canvas.pack(fill="both", expand=True)
+
+        img_orig = Image.open(archivo)
+
+        class ZoomViewer:
+            def __init__(self, canv, image):
+                self.canv     = canv
+                self.img_orig = image
+                self.scale    = 1.0
+                self.offset_x = 0
+                self.offset_y = 0
+                self._drag_x  = 0
+                self._drag_y  = 0
+                self._photo   = None
+                self._img_id  = None
+                canv.bind("<Configure>",        lambda e: self._fit_on_start(e))
+                canv.bind("<ButtonPress-1>",     self._drag_start)
+                canv.bind("<B1-Motion>",         self._drag_move)
+                canv.bind("<MouseWheel>",         self._on_wheel)          # Windows
+                canv.bind("<Button-4>",           self._on_wheel)          # Linux scroll up
+                canv.bind("<Button-5>",           self._on_wheel)          # Linux scroll down
+                self._fitted = False
+
+            def _fit_on_start(self, e):
+                if self._fitted:
+                    return
+                self._fitted = True
+                cw, ch = e.width, e.height
+                iw, ih = self.img_orig.size
+                self.scale    = min(cw / iw, ch / ih) * 0.96
+                self.offset_x = cw / 2
+                self.offset_y = ch / 2
+                self._render()
+
+            def _render(self):
+                iw, ih = self.img_orig.size
+                nw = max(1, int(iw * self.scale))
+                nh = max(1, int(ih * self.scale))
+                resized = self.img_orig.resize((nw, nh), Image.LANCZOS)
+                self._photo = ImageTk.PhotoImage(resized)
+                self.canv.delete("all")
+                self._img_id = self.canv.create_image(
+                    self.offset_x, self.offset_y,
+                    anchor="center", image=self._photo)
+                # Etiqueta de zoom
+                self.canv.create_text(
+                    8, 8, anchor="nw",
+                    text=f"Zoom: {self.scale*100:.0f}%",
+                    fill=C["muted"], font=("Segoe UI", 8))
+
+            def zoom(self, factor, cx=None, cy=None):
+                cw = self.canv.winfo_width()
+                ch = self.canv.winfo_height()
+                if cx is None: cx = cw / 2
+                if cy is None: cy = ch / 2
+                new_scale = max(0.05, min(self.scale * factor, 20.0))
+                ratio = new_scale / self.scale
+                self.offset_x = cx + (self.offset_x - cx) * ratio
+                self.offset_y = cy + (self.offset_y - cy) * ratio
+                self.scale = new_scale
+                self._render()
+
+            def reset(self):
+                cw = self.canv.winfo_width()
+                ch = self.canv.winfo_height()
+                iw, ih = self.img_orig.size
+                self.scale    = min(cw / iw, ch / ih) * 0.96
+                self.offset_x = cw / 2
+                self.offset_y = ch / 2
+                self._render()
+
+            def _drag_start(self, e):
+                self._drag_x = e.x
+                self._drag_y = e.y
+
+            def _drag_move(self, e):
+                dx = e.x - self._drag_x
+                dy = e.y - self._drag_y
+                self.offset_x += dx
+                self.offset_y += dy
+                self._drag_x = e.x
+                self._drag_y = e.y
+                self._render()
+
+            def _on_wheel(self, e):
+                # Windows: e.delta; Linux: e.num
+                if e.num == 4 or (hasattr(e, 'delta') and e.delta > 0):
+                    self.zoom(1.15, e.x, e.y)
+                elif e.num == 5 or (hasattr(e, 'delta') and e.delta < 0):
+                    self.zoom(1 / 1.15, e.x, e.y)
+
+        _viewer = ZoomViewer(canvas, img_orig)
+        # Exponer métodos al scope de los botones
+        win._viewer = _viewer
+
+    def _abrir_texto_grande(self, texto, titulo, color_titulo):
+        """Ventana expandible para mostrar la explicación completa con scroll y zoom de fuente."""
+        win = tk.Toplevel(self.root)
+        win.title(titulo.replace("  ", " ").strip())
+        win.configure(bg=C["bg"])
+        screen_w = win.winfo_screenwidth()
+        screen_h = win.winfo_screenheight()
+        win.geometry(f"{min(screen_w-80, 820)}x{min(screen_h-80, 680)}")
+
+        # ── Barra de controles ────────────────────────────────
+        bar = tk.Frame(win, bg=C["panel"], pady=6)
+        bar.pack(fill="x")
+        tk.Label(bar, text=titulo.strip(), font=("Segoe UI", 10, "bold"),
+                 fg=color_titulo, bg=C["panel"]).pack(side="left", padx=12)
+
+        font_size = [11]   # mutable para closure
+
+        def _cambiar_fuente(delta):
+            font_size[0] = max(8, min(font_size[0] + delta, 22))
+            txt_widget.config(font=("Segoe UI", font_size[0]))
+
+        for lbl, delta in [("A＋", 2), ("A－", -2)]:
+            tk.Button(bar, text=lbl, font=("Segoe UI", 9, "bold"),
+                      bg=C["panel2"], fg=C["text"],
+                      relief="flat", cursor="hand2", padx=8, pady=3,
+                      command=lambda d=delta: _cambiar_fuente(d)).pack(side="left", padx=2)
+
+        tk.Label(bar, text="Ctrl +/- para cambiar tamaño de texto",
+                 font=("Segoe UI", 8), fg=C["muted"], bg=C["panel"]).pack(side="right", padx=12)
+
+        tk.Button(bar, text="✕  Cerrar", font=FONT_SMALL,
+                  bg=C["red"], fg="white",
+                  relief="flat", cursor="hand2", padx=8, pady=3,
+                  command=win.destroy).pack(side="right", padx=8)
+
+        # ── Área de texto ─────────────────────────────────────
+        txt_widget = scrolledtext.ScrolledText(
+            win,
+            font=("Segoe UI", font_size[0]),
+            bg=C["card"], fg=C["text"],
+            relief="flat", bd=0,
+            padx=20, pady=16,
+            wrap="word",
+            state="normal"
+        )
+        txt_widget.pack(fill="both", expand=True, padx=0, pady=0)
+        txt_widget.insert("end", texto)
+        txt_widget.config(state="disabled")
+
+        # Atajos de teclado
+        win.bind("<Control-equal>", lambda e: _cambiar_fuente(2))
+        win.bind("<Control-plus>",  lambda e: _cambiar_fuente(2))
+        win.bind("<Control-minus>", lambda e: _cambiar_fuente(-2))
 
     def _actualizar_importancias(self):
         for w in self.frame_imp.winfo_children():
