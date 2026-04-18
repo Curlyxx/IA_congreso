@@ -91,15 +91,9 @@ Variables utilizadas : 11
 | Default previo registrado   | Categórica  |
 | Años de historial crediticio| Numérica    |
 
-## Estructura del proyecto
-
-predict-one/
-├── predictor.py
-├── credit_risk_dataset.csv
-├── requirements.txt
-└── README.md
 
 ## Autores
 
-Davila Mendez Harold Alexander
-Gomez Solis Isaac Efrain
+Davila Mendez Harold Alexander.
+
+Gomez Solis Isaac Efrain.
